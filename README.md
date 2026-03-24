@@ -20,6 +20,8 @@ Link to Google Colab Notebook: https://colab.research.google.com/drive/14ACz8svs
 
 ![alt text](<Screenshot 2026-02-10 183541.png>)
 
+Why are the results not fully accurate? This has been answered in the section: "Notes, Limitations, and Next Improvements"
+
 ---
 
 ## Highlights
