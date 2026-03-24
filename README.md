@@ -4,6 +4,8 @@ This project builds an **end-to-end image captioning model** that generates natu
 
 The goal is to demonstrate practical **multimodal / vision-language modeling** skills: transfer learning, tokenization, data augmentation, sequence modeling with Transformers, and autoregressive generation.
 
+Link to Google Colab Notebook: https://colab.research.google.com/drive/14ACz8svsl2cJr9xwEZ44F2cj5-yL8GbC?usp=sharing
+
 ---
 
 ## Results
