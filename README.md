@@ -1,216 +1,198 @@
-# Image Captioning with a Frozen CNN Encoder + Transformer Decoder (PyTorch)
+# Image Captioning with a Frozen CNN Encoder and Transformer Decoder
 
-This project builds an **end-to-end image captioning model** that generates natural-language descriptions for images. It uses a **pretrained image-classification CNN** as a frozen visual encoder and a **Transformer decoder** (implemented with PyTorch’s `nn.TransformerDecoder`) to produce captions autoregressively.
+This project is a notebook-first PyTorch implementation of image captioning: given an input image, it generates a short natural-language description. The model combines a pretrained `EfficientNet-B0` visual encoder used as a frozen feature extractor with a trainable Transformer decoder that generates captions autoregressively. The goal is not to claim benchmark performance or production readiness, but to demonstrate a clear, end-to-end multimodal learning pipeline covering dataset preparation, tokenization, modeling, training, checkpointing, and inference in Google Colab.
 
-The goal is to demonstrate practical **multimodal / vision-language modeling** skills: transfer learning, tokenization, data augmentation, sequence modeling with Transformers, and autoregressive generation.
+Notebook: [Open in Google Colab](https://colab.research.google.com/drive/14ACz8svsl2cJr9xwEZ44F2cj5-yL8GbC?usp=sharing)
 
-Link to Google Colab Notebook: https://colab.research.google.com/drive/14ACz8svsl2cJr9xwEZ44F2cj5-yL8GbC?usp=sharing
+## Key Features / Highlights
 
----
+- Frozen `EfficientNet-B0` encoder built with `timm` for transfer learning from pretrained visual features.
+- Trainable linear projection that maps CNN features into the Transformer decoder hidden space.
+- Multi-layer `nn.TransformerDecoder` with learned token and positional embeddings for autoregressive caption generation.
+- Custom word-level vocabulary pipeline using NLTK `wordpunct_tokenize`.
+- Albumentations-based image preprocessing with ImageNet normalization and lightweight training augmentation.
+- Teacher-forced next-token training with causal masking, padding masks, AMP, and gradient clipping.
+- Inference that supports both greedy decoding and temperature-based sampling with optional `top_k`.
+- Notebook-first workflow that makes the full modeling pipeline easy to inspect and discuss in interviews.
 
-## Results
+## Demo / Example Output
 
-![alt text](<Screenshot 2026-02-10 182906.png>)
+Sample generated caption from the notebook:
 
-![alt text](<Screenshot 2026-02-10 182741.png>) 
+> a young boy wearing a red helmet rides his bicycle down a road
 
-![alt text](<Screenshot 2026-02-10 182620.png>) 
+Example qualitative outputs captured from notebook runs:
 
-![alt text](<Screenshot 2026-02-10 182218.png>) 
+![Captioning result 1](<Screenshot 2026-02-10 182906.png>)
 
-![alt text](<Screenshot 2026-02-10 183541.png>)
+![Captioning result 2](<Screenshot 2026-02-10 182741.png>)
 
-Why are the results not fully accurate? This has been answered in the section: "Notes, Limitations, and Next Improvements"
+## Project Motivation / Why I Built This
 
----
+I built this project to understand image captioning as a true multimodal problem rather than as separate computer vision and NLP exercises. The focus was on learning how to connect a pretrained visual backbone to a language model, build a custom captioning dataset pipeline, train the system end to end, and reason about practical tradeoffs in model design. It is intentionally compact and notebook-centric so the entire workflow is visible in one place and easy to explain.
 
-## Highlights
+## Architecture Overview
 
-* **Visual encoder:** pretrained **EfficientNet-B0** (`timm`) used as a feature extractor (`num_classes=0`, global average pooling)
-* **Frozen CNN weights:** encoder runs under `torch.no_grad()` and `requires_grad=False`
-* **Trainable bridge:** a linear projection maps CNN features → Transformer model dimension
-* **Text decoder:** multi-layer Transformer decoder with causal masking for next-token prediction
-* **Data pipeline:** Flickr8k captions parsing + custom word-level tokenizer (NLTK) + padding/truncation
-* **Image preprocessing:** Albumentations resize/augment + ImageNet normalization
-* **Training optimizations:** AMP (mixed precision when CUDA available), gradient clipping, and fast DataLoader settings
-* **Inference:** greedy decoding or sampling with `temperature` + `top_k`
+```mermaid
+flowchart LR
+    A["Input image"] --> B["Preprocessing<br/>resize, normalize, tensor"]
+    B --> C["EfficientNet-B0<br/>frozen encoder"]
+    C --> D["Linear projection"]
+    D --> E["Single image memory token<br/>(B, 1, D)"]
+    F["Previous caption tokens"] --> G["Token + positional embeddings"]
+    G --> H["Transformer decoder"]
+    E --> H
+    H --> I["Vocabulary projection"]
+    I --> J["Next token"]
+    J --> H
+```
 
----
+At a high level, the encoder turns each image into one pooled feature vector, the projection layer maps that vector into the decoder hidden dimension, and the Transformer decoder predicts caption tokens one step at a time. A key simplification is that the decoder attends to a single pooled image token instead of spatial feature maps or patch embeddings. That keeps the model easy to reason about, but it also limits fine-grained grounding and detailed scene understanding.
+
+## How It Works
+
+1. Parse `captions.txt` into `(image filename, caption)` pairs and expand multiple captions per image into one row per training example.
+2. Build a word-level vocabulary from caption frequencies, then convert each caption into integer token IDs with `<START>`, `<END>`, and `<PAD>` handling.
+3. Load each image with OpenCV, apply resizing and normalization, and optionally apply light training augmentation.
+4. Encode the image once with a frozen `EfficientNet-B0`, then project the pooled feature vector into the decoder embedding space.
+5. Train the Transformer decoder with teacher forcing so it predicts the next caption token conditioned on both prior tokens and the image representation.
+6. During inference, preprocess the image, encode it once, and autoregressively decode tokens until `<END>` is generated or the maximum context length is reached.
 
 ## Dataset
 
-* **Flickr8kVersion** downloaded from Kaggle: [https://www.kaggle.com/datasets/adityajn105/flickr8k/data](https://www.kaggle.com/datasets/adityajn105/flickr8k/data)
-* The notebook expects the dataset to live in Google Drive like:
+The notebook is written around the Flickr8k dataset, expected in Google Drive under `Flickr8kVersion/`.
 
-```
+- Dataset source: [Flickr8k on Kaggle](https://www.kaggle.com/datasets/adityajn105/flickr8k/data)
+- Expected structure:
+
+```text
 Flickr8kVersion/
-  Images/
-    <all .jpg files>
-  captions.txt
+|-- Images/
+|   `-- *.jpg
+`-- captions.txt
 ```
 
-### Caption parsing
+- `captions.txt` is read line by line and parsed into image-caption pairs.
+- Images with multiple captions are expanded into multiple rows in a Pandas DataFrame.
+- One known missing image is explicitly skipped to avoid training failures:
+  `2258277193_586949ec62.jpg`
 
-* `captions.txt` is read line-by-line and converted into a DataFrame of `(filename, caption)` pairs.
-* One known missing image is skipped to avoid training crashes:
+## Tokenization and Preprocessing
 
-  * `2258277193_586949ec62.jpg`
+### Text preprocessing
 
----
+- Tokenizer: NLTK `wordpunct_tokenize`
+- Normalization:
+  - lowercase every token
+  - keep only alphanumeric tokens with `t.isalnum()`
+- Vocabulary is built from token frequency counts across all captions.
+- Special tokens:
+  - `<UNKNOWN>` -> id `0`
+  - `<PAD>` -> id `1`
+  - `<START>` -> id `2`
+  - `<END>` -> id `3`
+- Captions are converted to:
+  `[<START>] + tokens + [<END>]`
+- Fixed context length: `20`
+- Short captions are padded with `<PAD>`.
+- Long captions are truncated and forced to end with `<END>`.
+
+### Image preprocessing
+
+- Load images with OpenCV.
+- Convert `BGR -> RGB`.
+- Resize to `224 x 224`.
+- Normalize with ImageNet mean and standard deviation.
+- Convert to tensors with `ToTensorV2()`.
+- Training-time augmentation includes:
+  - `HorizontalFlip()`
+  - `ColorJitter()`
 
 ## Model Architecture
 
-### High-level flow
+Model class: `ImageCaptioner`
 
-1. **Image → CNN encoder (EfficientNet-B0)** → pooled feature vector
-2. **Linear projection** to match Transformer `model_dim`
-3. **Transformer decoder** attends to the image embedding (as *memory*) and previous caption tokens
-4. **Vocabulary projection** outputs logits over tokens for each time step
+| Component | Implementation |
+|---|---|
+| Visual encoder | `timm.create_model('efficientnet_b0', pretrained=True, num_classes=0, global_pool='avg')` |
+| Encoder output | One pooled feature vector per image |
+| Bridge layer | `nn.Linear(in_features, model_dim)` |
+| Token embeddings | `nn.Embedding(vocab_size, model_dim)` |
+| Positional embeddings | `nn.Embedding(context_length, model_dim)` |
+| Decoder | `nn.TransformerDecoder` built from `nn.TransformerDecoderLayer(...)` |
+| Output head | `nn.Linear(model_dim, vocab_size)` |
 
-### Encoder (frozen)
+Decoder configuration from the notebook:
 
-* Implemented via `timm.create_model('efficientnet_b0', pretrained=True, num_classes=0, global_pool='avg')`
-* Output is a single feature vector per image.
-* Encoder weights are frozen:
+- `model_dim = 512`
+- `num_blocks = 6`
+- `num_heads = 16`
+- `dropout = 0.1`
+- `context_length = 20`
 
-  * `for p in model.cnn_encoder.parameters(): p.requires_grad = False`
-  * forward pass uses `with torch.no_grad(): ...`
+Important modeling choice:
 
-### Bridge layer
+- The image is reduced to a single global feature vector.
+- That vector is projected and reshaped into Transformer memory of shape `(B, 1, D)`.
+- The decoder therefore attends to one image memory token rather than a spatial grid of visual features.
 
-* `project: nn.Linear(in_features, model_dim)`
-* The projected embedding is reshaped into Transformer “memory” as `(B, 1, D)`.
+This is a meaningful design tradeoff. It keeps the architecture compact and makes the vision-language interface easy to inspect, but it also limits the model's ability to localize fine details or reason about multiple regions independently.
 
-### Decoder (Transformer)
+The decoder uses:
 
-* Token embeddings: `nn.Embedding(vocab_size, model_dim)`
-* Positional embeddings: `nn.Embedding(context_length, model_dim)`
-* Decoder stack:
+- a causal mask to prevent attention to future tokens during training
+- a padding mask to ignore `<PAD>` tokens in caption sequences
 
-  * `nn.TransformerDecoderLayer(d_model=model_dim, nhead=num_heads, dim_feedforward=2*model_dim, dropout=prob, batch_first=True, norm_first=True)`
-  * wrapped by `nn.TransformerDecoder(..., num_layers=num_blocks)`
-* Output head: `nn.Linear(model_dim, vocab_size)`
+## Training Setup
 
-### Training-time masking
+Training is performed with teacher forcing for next-token prediction.
 
-* **Causal mask** (prevents looking ahead): `generate_square_subsequent_mask(T)`
-* **Padding mask** (ignores `<PAD>` tokens): `tgt_key_padding_mask = (tokens == pad_id)`
+- Inputs: caption tokens shifted right
+- Targets: caption tokens shifted left
+- Loss: `CrossEntropyLoss(ignore_index=<PAD>)`
+- Optimizer: `AdamW(lr=2e-5, weight_decay=0.01)`
+- Gradient clipping: `2.0`
+- AMP: enabled when CUDA is available
+- Frozen encoder behavior:
+  - `requires_grad = False` for encoder parameters
+  - encoder forward pass runs under `torch.no_grad()`
+  - encoder is kept in eval mode during training for BatchNorm stability
 
----
+DataLoader configuration in the notebook:
 
-## Tokenization & Vocabulary
+- `num_epochs = 40`
+- `batch_size = 128`
+- `shuffle = True`
+- `num_workers = 8`
+- `pin_memory = True`
+- `persistent_workers = True`
+- `prefetch_factor = 2`
 
-This notebook uses a simple, robust **word-level tokenizer** based on NLTK:
-
-* Tokenization: `wordpunct_tokenize`
-* Normalization:
-
-  * lowercasing
-  * keep only alphanumeric tokens (`t.isalnum()`)
-
-Vocabulary is built from caption word frequencies and includes special tokens:
-
-* `<UNKNOWN>` (id 0)
-* `<PAD>` (id 1)
-* `<START>` (id 2)
-* `<END>` (id 3)
-
-Each caption is converted into a fixed-length integer sequence:
-
-* `[<START>] + tokens + [<END>]`
-* **Padding:** pad to `context_length` with `<PAD>`
-* **Truncation:** if too long, truncate and force the final token to `<END>`
-
----
-
-## Image Preprocessing (Albumentations)
-
-All images are resized to **224×224** and normalized with **ImageNet mean/std**.
-
-* Common transforms:
-
-  * `Resize(224, 224)`
-  * `Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225))`
-  * `ToTensorV2()`
-* Training-only augmentation:
-
-  * `HorizontalFlip()`
-  * `ColorJitter()`
-
----
-
-## Training
-
-### Objective
-
-The model is trained with **teacher forcing** using **next-token prediction**:
-
-* Input tokens: `<START> w1 w2 ... w_{T-2}`
-* Target tokens: `w1 w2 ... w_{T-2} <END>/<PAD>`
-
-Loss:
-
-* `CrossEntropyLoss(ignore_index=pad_id)`
-
-### Hyperparameters (from the notebook)
-
-* `context_length = 20`
-* `model_dim = 512`
-* `num_blocks = 6`
-* `num_heads = 16`
-* `dropout = 0.1`
-
-Training loop settings:
-
-* `batch_size = 128`
-* `num_epochs = 40`
-* Optimizer: `AdamW(lr=2e-5, weight_decay=0.01)`
-* Gradient clipping: `clip_grad_norm_(..., 2.0)`
-* AMP (if CUDA is available): `torch.cuda.amp.autocast` + `GradScaler`
-
-DataLoader performance options:
-
-* `num_workers = 8`
-* `pin_memory = True`
-* `persistent_workers = True`
-* `prefetch_factor = 2`
-
-### Saving
-
-Weights are saved to:
-
-```bash
-torch.save(model.state_dict(), 'weights.pt')
-```
-
----
-
-## Loading a Trained Model
-
-If you’ve already trained the model, you can skip the training cells and load the saved weights:
+Weights are saved in the notebook as:
 
 ```python
-model.load_state_dict(torch.load('weights.pt'))
+torch.save(model.state_dict(), "weights.pt")
 ```
 
-Make sure you recreate the model with the **same hyperparameters** used during training (same `context_length`, vocab, `model_dim`, etc.).
+## Inference / Caption Generation
 
----
+Caption generation is implemented in `generate_caption(...)`.
 
-## Caption Generation (Inference)
+Inference flow:
 
-The notebook includes a `generate_caption(...)` function that:
+1. Preprocess the image with the same resize and normalization pipeline used in training, without augmentation.
+2. Encode the image once with the frozen CNN.
+3. Project the image feature into decoder memory.
+4. Generate tokens autoregressively until `<END>` is produced or the context limit is reached.
 
-1. Loads and preprocesses an image
-2. Encodes it **once** using the frozen CNN
-3. Autoregressively decodes tokens until `<END>` or `context_length` is reached
+Decoding options:
 
-Supported decoding modes:
+- Greedy decoding when `temperature <= 0`
+- Stochastic sampling when `temperature > 0`
+- Optional `top_k` filtering
+- `<PAD>` and `<START>` are blocked from being sampled as next tokens
 
-* **Greedy decoding:** `temperature=0.0`
-* **Sampling:** set `temperature>0` and optionally `top_k` (e.g., `top_k=50`)
-
-Example (as used in the notebook):
+Example call used in the notebook:
 
 ```python
 caption = generate_caption(
@@ -225,65 +207,120 @@ caption = generate_caption(
 print(caption)
 ```
 
----
+## Results
 
-## How to Run (Colab)
+This project is best read as a qualitative learning project rather than a benchmarked experiment.
 
-1. Open the notebook: `image_captioning_transformer.ipynb`
-2. Install dependencies:
+- The notebook includes sanity checks that decode tokenized captions back into readable text.
+- Saved notebook outputs show early average training loss moving from `0.7888` to `0.7816` to `0.7760` across the first three completed epochs shown.
+- A sample generated caption from inference is:
+  `a young boy wearing a red helmet rides his bicycle down a road`
 
-   * `timm`, `albumentations`
-3. Mount Google Drive and set the working directory:
+Additional qualitative examples from the notebook:
 
-   * `drive/MyDrive/Flickr8kVersion`
-4. Run:
+![Captioning result 3](<Screenshot 2026-02-10 182620.png>)
 
-   * dataset loading
-   * tokenization
-   * model definition
-   * training loop (optional if you already have weights)
-   * save weights
-5. For inference:
+![Captioning result 4](<Screenshot 2026-02-10 182218.png>)
 
-   * load `weights.pt`
-   * upload an image in Colab
-   * run caption generation
+These results are useful as directional evidence that the pipeline is learning caption structure and basic scene semantics, but the repository does not include formal evaluation metrics or held-out benchmark reporting.
 
+## Limitations
 
----
+- No practical train/validation/test split is implemented in the current notebook workflow.
+- No quantitative captioning metrics such as BLEU, CIDEr, METEOR, or ROUGE are reported.
+- Captions are capped at a context length of `20`, which limits descriptive richness.
+- The decoder attends to a single pooled image token rather than richer spatial feature maps.
+- The workflow is notebook-centric and depends on Google Colab / Google Drive conventions.
+- The repository is intentionally educational and portfolio-oriented, not packaged as a reusable library or service.
 
-## Notes, Limitations, and Next Improvements
-
-This project is intentionally focused on the **core multimodal modeling pipeline**. The results are not so great due to a few factors:
-
-* The training data is small, which also reduces vocabulary size significantly.
-* The number of parameters is low. More attention heads and more transformer blocks will increase the number of parameters and this, along with a bigger dataset, will help with better learning.
-
-Possible Improvements:
-
-* Use a pre-trained BERT/GPT decoder and finetune it on the current dataset
-* Add **train/val/test splits** and report captioning metrics.
-* Unfreeze and fine-tune the CNN:
-
-  * unfreeze only the last blocks for a small LR
-* Use a stronger vision encoder (e.g., ViT, ConvNeXt) or CLIP-like features
-* Replace the single “memory token” with spatial features (patch/grid features) so the decoder can attend to richer image content
-
----
+These limitations are part of the tradeoff that makes the project compact, readable, and easy to discuss, while still covering the core mechanics of multimodal sequence generation.
 
 ## Tech Stack
 
-* Python
-* PyTorch
-* `timm` (pretrained CNN encoder)
-* Albumentations (`Resize`, augmentation, normalization)
-* OpenCV (image loading)
-* NLTK (tokenization)
-* Pandas (caption table)
+- Python
+- PyTorch
+- `timm`
+- Albumentations
+- OpenCV
+- NLTK
+- Pandas
+- Google Colab
 
----
+## Repository Structure
 
-## Acknowledgements
+```text
+.
+|-- .gitignore
+|-- LICENSE
+|-- README.md
+|-- image_captioning_transformer.ipynb
+|-- Screenshot 2026-02-10 182218.png
+|-- Screenshot 2026-02-10 182620.png
+|-- Screenshot 2026-02-10 182741.png
+|-- Screenshot 2026-02-10 182906.png
+`-- Screenshot 2026-02-10 183541.png
+```
 
-* Flickr8k dataset (via Kaggle)
-* `timm` and PyTorch for pretrained models and Transformer building blocks
+## Setup / Installation
+
+> Practical note: the Flickr8k dataset is not included in this repository, and trained weights such as `weights.pt` are not checked in. You will need to provide the dataset yourself and either train the model or load your own saved checkpoint.
+
+The notebook is written for Google Colab and directly uses `google.colab.drive` and `files.upload()`. If you want to run it locally, you will need to adapt the Drive-mount and upload cells.
+
+Install the Python packages used in the notebook. A typical setup looks like:
+
+```bash
+pip install torch torchvision timm albumentations opencv-python pandas nltk matplotlib pillow
+```
+
+If you are using Google Colab, PyTorch is often already available and you may only need to install the additional packages used by the notebook.
+
+## How to Run
+
+1. Open `image_captioning_transformer.ipynb` in Google Colab or a compatible notebook environment.
+2. Install the required Python packages used in the notebook.
+3. Place the dataset in Google Drive with this structure:
+
+   ```text
+   drive/MyDrive/Flickr8kVersion/
+   |-- Images/
+   `-- captions.txt
+   ```
+
+4. Run the notebook cells in order:
+   - dependency setup
+   - dataset loading
+   - tokenization and vocabulary building
+   - model definition
+   - training
+   - checkpoint saving
+5. For inference:
+   - load `weights.pt` if you already trained the model
+   - upload an image through the notebook
+   - run the caption generation cell
+
+If you already have trained weights, the notebook notes that you can skip the training cells and load the checkpoint before running inference.
+
+## Future Improvements
+
+- Add proper train, validation, and test splits.
+- Report captioning metrics such as BLEU, CIDEr, METEOR, or ROUGE.
+- Replace the single pooled memory token with spatial features so the decoder can attend to richer visual structure.
+- Fine-tune part of the visual encoder instead of keeping it fully frozen.
+- Try a stronger visual backbone such as ViT, ConvNeXt, or CLIP-style features.
+- Explore a stronger language decoder or pretrained language-model initialization.
+- Refactor the notebook into reusable modules for improved portability and experimentation.
+
+## What This Project Demonstrates
+
+- Understanding of encoder-decoder multimodal modeling in PyTorch
+- Practical transfer learning with a frozen pretrained vision backbone
+- Building a custom caption tokenization and vocabulary pipeline
+- Training an autoregressive Transformer decoder with causal masking
+- Applying image preprocessing and lightweight augmentation for multimodal learning
+- Managing the full notebook workflow from data loading to inference
+- Awareness of architectural tradeoffs, simplifications, and next-step improvements
+
+## Summary
+
+This repository is a compact but technically serious image captioning project that connects pretrained visual features to a Transformer language decoder in a way that is easy to inspect and explain. It is intentionally scoped as a learning and portfolio project, but it still demonstrates the full workflow and many of the core ideas behind modern multimodal sequence generation systems.
